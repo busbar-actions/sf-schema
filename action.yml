@@ -1,0 +1,198 @@
+name: 'Busbar SF Schema'
+description: 'Pull Salesforce org schema and write per-SObject Kantext files into the repo'
+author: 'busbar.agency'
+branding:
+  icon: 'database'
+  color: 'blue'
+
+inputs:
+  sf-access-token:
+    description: 'Salesforce session access token (provide via secrets).'
+    required: true
+  sf-instance-url:
+    description: 'Salesforce instance URL, e.g. https://yourdomain.my.salesforce.com'
+    required: true
+
+  output-path:
+    description: 'Where the per-SObject .kant files are written, relative to the repo root.'
+    required: false
+    default: '.busbar/Platforms/Salesforce/Schema'
+
+  filters:
+    description: |
+      Comma-separated SObject filter flags. Valid values:
+        createable, updateable, deletable, queryable, retrieveable, searchable,
+        custom, standard, populated, extractable, has-master-detail,
+        is-lookup-target, has-record-types, has-formula-fields, has-encrypted-fields
+    required: false
+    default: ''
+  name-match:
+    description: 'Glob over SObject API names (e.g. "Account*" or "*__c"). Applied in addition to filters.'
+    required: false
+    default: ''
+  objects:
+    description: 'Explicit comma-separated SObject names to export. Overrides filters/name-match when set.'
+    required: false
+    default: ''
+  min-field-count:
+    description: 'Drop SObjects with fewer than this many fields.'
+    required: false
+    default: ''
+  max-field-count:
+    description: 'Drop SObjects with more than this many fields.'
+    required: false
+    default: ''
+  include-counts:
+    description: 'Include record counts in the export (one extra API call per SObject).'
+    required: false
+    default: 'false'
+
+  version:
+    description: 'busbar-sf release tag to download (e.g. v0.4.2). "latest" resolves the most recent release.'
+    required: false
+    default: 'latest'
+  binary-repo:
+    description: 'GitHub repo that publishes the busbar-sf binary releases.'
+    required: false
+    default: 'busbar-actions/actions-dist'
+
+  commit:
+    description: 'Commit any changes back to the current branch after the pull.'
+    required: false
+    default: 'true'
+  commit-message:
+    description: 'Commit message used when changes are committed.'
+    required: false
+    default: 'chore(schema): refresh Salesforce schema'
+  git-user-name:
+    description: 'git user.name for the commit.'
+    required: false
+    default: 'busbar-bot'
+  git-user-email:
+    description: 'git user.email for the commit.'
+    required: false
+    default: 'bot@busbar.agency'
+
+outputs:
+  changed:
+    description: '"true" if the schema export produced changes that were committed (or would have been).'
+    value: ${{ steps.diff.outputs.changed }}
+  object-count:
+    description: 'Number of SObjects written.'
+    value: ${{ steps.export.outputs.object-count }}
+  output-path:
+    description: 'Path where the schema was written (echoes the input).'
+    value: ${{ inputs.output-path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Resolve release tag
+      id: tag
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ "${{ inputs.version }}" == "latest" ]]; then
+          tag=$(gh release view --repo "${{ inputs.binary-repo }}" --json tagName -q .tagName)
+        else
+          tag="${{ inputs.version }}"
+        fi
+        echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      env:
+        GH_TOKEN: ${{ github.token }}
+
+    - name: Determine asset name
+      id: asset
+      shell: bash
+      run: |
+        set -euo pipefail
+        os="${{ runner.os }}"
+        arch="${{ runner.arch }}"
+        case "$os-$arch" in
+          Linux-X64)   name="busbar-sf-x86_64-unknown-linux-gnu" ;;
+          Linux-ARM64) name="busbar-sf-aarch64-unknown-linux-gnu" ;;
+          macOS-X64)   name="busbar-sf-x86_64-apple-darwin" ;;
+          macOS-ARM64) name="busbar-sf-aarch64-apple-darwin" ;;
+          Windows-X64) name="busbar-sf-x86_64-pc-windows-msvc.exe" ;;
+          *) echo "::error::Unsupported runner: $os-$arch"; exit 1 ;;
+        esac
+        echo "name=$name" >> "$GITHUB_OUTPUT"
+
+    - name: Download busbar-sf binary
+      shell: bash
+      run: |
+        set -euo pipefail
+        bin_dir="${RUNNER_TEMP}/busbar-sf"
+        mkdir -p "$bin_dir"
+        gh release download "${{ steps.tag.outputs.tag }}" \
+          --repo "${{ inputs.binary-repo }}" \
+          --pattern "${{ steps.asset.outputs.name }}" \
+          --dir "$bin_dir"
+        bin_path="$bin_dir/${{ steps.asset.outputs.name }}"
+        chmod +x "$bin_path"
+        echo "$bin_dir" >> "$GITHUB_PATH"
+        # Provide a stable name so the next step can just call `busbar-sf`.
+        if [[ "$bin_path" != "$bin_dir/busbar-sf" && "$bin_path" != "$bin_dir/busbar-sf.exe" ]]; then
+          ext=""
+          [[ "${{ runner.os }}" == "Windows" ]] && ext=".exe"
+          ln -sf "$bin_path" "$bin_dir/busbar-sf$ext"
+        fi
+      env:
+        GH_TOKEN: ${{ github.token }}
+
+    - name: Export schema
+      id: export
+      shell: bash
+      env:
+        SF_ACCESS_TOKEN: ${{ inputs.sf-access-token }}
+        SF_INSTANCE_URL: ${{ inputs.sf-instance-url }}
+      run: |
+        set -euo pipefail
+        args=(schema cache --cache-dir "${{ inputs.output-path }}" --refresh)
+
+        if [[ -n "${{ inputs.filters }}" ]]; then
+          args+=(--filters "${{ inputs.filters }}")
+        fi
+        if [[ -n "${{ inputs.name-match }}" ]]; then
+          args+=(--name-match "${{ inputs.name-match }}")
+        fi
+        if [[ -n "${{ inputs.min-field-count }}" ]]; then
+          args+=(--min-field-count "${{ inputs.min-field-count }}")
+        fi
+        if [[ -n "${{ inputs.max-field-count }}" ]]; then
+          args+=(--max-field-count "${{ inputs.max-field-count }}")
+        fi
+        if [[ "${{ inputs.include-counts }}" == "true" ]]; then
+          args+=(--include-counts)
+        fi
+
+        mkdir -p "${{ inputs.output-path }}"
+
+        log="${RUNNER_TEMP}/busbar-sf.log"
+        busbar-sf "${args[@]}" 2>&1 | tee "$log"
+
+        # `schema cache` prints "Exported schema for N objects" — parse N if present.
+        count=$(grep -oE 'Exported schema for [0-9]+ objects' "$log" | grep -oE '[0-9]+' | head -n1 || true)
+        echo "object-count=${count:-0}" >> "$GITHUB_OUTPUT"
+
+    - name: Detect changes
+      id: diff
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ -z "$(git status --porcelain -- "${{ inputs.output-path }}")" ]]; then
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Commit changes
+      if: inputs.commit == 'true' && steps.diff.outputs.changed == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        git config user.name  "${{ inputs.git-user-name }}"
+        git config user.email "${{ inputs.git-user-email }}"
+        git add -- "${{ inputs.output-path }}"
+        git commit -m "${{ inputs.commit-message }}"
+        git push

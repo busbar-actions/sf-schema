@@ -148,7 +148,10 @@ runs:
         SF_INSTANCE_URL: ${{ inputs.sf-instance-url }}
       run: |
         set -euo pipefail
-        args=(schema cache --cache-dir "${{ inputs.output-path }}" --refresh)
+        # Typesynth-free path: `schema dump` writes one JSON file per SObject
+        # via the SF REST Describe API. Replaces the older `schema cache`,
+        # which produced .kant files via typesynth's Declared model.
+        args=(schema dump --output "${{ inputs.output-path }}")
 
         if [[ -n "${{ inputs.filters }}" ]]; then
           args+=(--filters "${{ inputs.filters }}")
@@ -156,23 +159,17 @@ runs:
         if [[ -n "${{ inputs.name-match }}" ]]; then
           args+=(--name-match "${{ inputs.name-match }}")
         fi
-        if [[ -n "${{ inputs.min-field-count }}" ]]; then
-          args+=(--min-field-count "${{ inputs.min-field-count }}")
-        fi
-        if [[ -n "${{ inputs.max-field-count }}" ]]; then
-          args+=(--max-field-count "${{ inputs.max-field-count }}")
-        fi
-        if [[ "${{ inputs.include-counts }}" == "true" ]]; then
-          args+=(--include-counts)
-        fi
+        # NOTE: --min-field-count / --max-field-count / --include-counts are
+        # not (yet) supported by `schema dump`; they were typesynth-cache
+        # specific. If still wanted, post-filter the JSON output in a step.
 
         mkdir -p "${{ inputs.output-path }}"
 
         log="${RUNNER_TEMP}/busbar-sf.log"
         busbar-sf "${args[@]}" 2>&1 | tee "$log"
 
-        # `schema cache` prints "Exported schema for N objects" — parse N if present.
-        count=$(grep -oE 'Exported schema for [0-9]+ objects' "$log" | grep -oE '[0-9]+' | head -n1 || true)
+        # `schema dump` prints "Wrote N schema files" — parse N if present.
+        count=$(grep -oE 'Wrote [0-9]+ schema files' "$log" | grep -oE '[0-9]+' | head -n1 || true)
         echo "object-count=${count:-0}" >> "$GITHUB_OUTPUT"
 
     - name: Detect changes

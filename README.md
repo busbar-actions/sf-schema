@@ -1,17 +1,19 @@
 # busbar-actions/sf-schema
 
-Pull a Salesforce org's schema and write it into your repo as per-SObject Kantext (`.kant`) files.
+Pull a Salesforce org's schema and write it into your repo as **per-SObject JSON describe files**, so schema drift surfaces as reviewable git diffs.
 
-Each SObject lands as its own `⛩️ ObjectName:` Boundary file under the configured `output-path`, so the schema participates in Kantext layer composition (substrate, refresh, overlays) and stacks cleanly across environments.
+Each SObject lands as `<output-path>/<SObjectName>.json` containing the full REST Describe response (pretty-printed, stably ordered), giving you a diff-friendly snapshot of every object's fields, relationships, picklists, etc.
 
 ## What it does
 
-Wraps the `busbar-sf schema cache --refresh` command, which:
+Wraps the `busbar-sf schema dump` command, which:
 
 1. Authenticates to Salesforce via session token (`SF_ACCESS_TOKEN` + `SF_INSTANCE_URL`).
-2. Fetches the org's SObject describes (optionally filtered).
-3. Writes per-SObject `.kant` files into the chosen output directory via the Declared emission pipeline.
+2. Fetches the org's SObject list (optionally filtered by capability / name glob / explicit object list).
+3. Calls REST Describe on each selected SObject and writes the JSON to `<output-path>/<Name>.json`.
 4. (Optionally) commits the result back to the current branch.
+
+The implementation is typesynth-free — pure `reqwest` against `/services/data/vXX/sobjects/<Name>/describe` — so the binary stays small and builds without the schema-modeling crate.
 
 ## Inputs
 

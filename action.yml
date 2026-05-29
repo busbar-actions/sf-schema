@@ -48,11 +48,11 @@ inputs:
     default: 'false'
 
   version:
-    description: 'busbar-sf release tag to download (e.g. v0.4.2). "latest" resolves the most recent release.'
+    description: 'sf-schema-dump release tag to download (e.g. v0.4.2). "latest" resolves the most recent release.'
     required: false
     default: 'latest'
   binary-repo:
-    description: 'GitHub repo that publishes the busbar-sf binary releases.'
+    description: 'GitHub repo that publishes the sf-schema-dump binary releases.'
     required: false
     default: 'busbar-actions/actions-dist'
 
@@ -109,20 +109,20 @@ runs:
         os="${{ runner.os }}"
         arch="${{ runner.arch }}"
         case "$os-$arch" in
-          Linux-X64)   name="busbar-sf-x86_64-unknown-linux-gnu" ;;
-          Linux-ARM64) name="busbar-sf-aarch64-unknown-linux-gnu" ;;
-          macOS-X64)   name="busbar-sf-x86_64-apple-darwin" ;;
-          macOS-ARM64) name="busbar-sf-aarch64-apple-darwin" ;;
-          Windows-X64) name="busbar-sf-x86_64-pc-windows-msvc.exe" ;;
+          Linux-X64)   name="sf-schema-dump-x86_64-unknown-linux-gnu" ;;
+          Linux-ARM64) name="sf-schema-dump-aarch64-unknown-linux-gnu" ;;
+          macOS-X64)   name="sf-schema-dump-x86_64-apple-darwin" ;;
+          macOS-ARM64) name="sf-schema-dump-aarch64-apple-darwin" ;;
+          Windows-X64) name="sf-schema-dump-x86_64-pc-windows-msvc.exe" ;;
           *) echo "::error::Unsupported runner: $os-$arch"; exit 1 ;;
         esac
         echo "name=$name" >> "$GITHUB_OUTPUT"
 
-    - name: Download busbar-sf binary
+    - name: Download sf-schema-dump binary
       shell: bash
       run: |
         set -euo pipefail
-        bin_dir="${RUNNER_TEMP}/busbar-sf"
+        bin_dir="${RUNNER_TEMP}/sf-schema-dump"
         mkdir -p "$bin_dir"
         gh release download "${{ steps.tag.outputs.tag }}" \
           --repo "${{ inputs.binary-repo }}" \
@@ -131,11 +131,11 @@ runs:
         bin_path="$bin_dir/${{ steps.asset.outputs.name }}"
         chmod +x "$bin_path"
         echo "$bin_dir" >> "$GITHUB_PATH"
-        # Provide a stable name so the next step can just call `busbar-sf`.
-        if [[ "$bin_path" != "$bin_dir/busbar-sf" && "$bin_path" != "$bin_dir/busbar-sf.exe" ]]; then
+        # Provide a stable name so the next step can just call the binary.
+        if [[ "$bin_path" != "$bin_dir/sf-schema-dump" && "$bin_path" != "$bin_dir/sf-schema-dump.exe" ]]; then
           ext=""
           [[ "${{ runner.os }}" == "Windows" ]] && ext=".exe"
-          ln -sf "$bin_path" "$bin_dir/busbar-sf$ext"
+          ln -sf "$bin_path" "$bin_dir/sf-schema-dump$ext"
         fi
       env:
         GH_TOKEN: ${{ github.token }}
@@ -151,7 +151,7 @@ runs:
         # Typesynth-free path: `schema dump` writes one JSON file per SObject
         # via the SF REST Describe API. Replaces the older `schema cache`,
         # which produced .kant files via typesynth's Declared model.
-        args=(schema dump --output "${{ inputs.output-path }}")
+        args=(--output "${{ inputs.output-path }}")
 
         if [[ -n "${{ inputs.filters }}" ]]; then
           args+=(--filters "${{ inputs.filters }}")
@@ -165,8 +165,8 @@ runs:
 
         mkdir -p "${{ inputs.output-path }}"
 
-        log="${RUNNER_TEMP}/busbar-sf.log"
-        busbar-sf "${args[@]}" 2>&1 | tee "$log"
+        log="${RUNNER_TEMP}/sf-schema-dump.log"
+        sf-schema-dump "${args[@]}" 2>&1 | tee "$log"
 
         # `schema dump` prints "Wrote N schema files" — parse N if present.
         count=$(grep -oE 'Wrote [0-9]+ schema files' "$log" | grep -oE '[0-9]+' | head -n1 || true)

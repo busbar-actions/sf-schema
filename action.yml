@@ -1,5 +1,5 @@
 name: 'Busbar SF Schema'
-description: 'Pull Salesforce org schema and write per-SObject Kantext files into the repo'
+description: 'Pull Salesforce org schema and write per-SObject describe JSON files into the repo'
 author: 'busbar.agency'
 branding:
   icon: 'database'
@@ -14,7 +14,7 @@ inputs:
     required: true
 
   output-path:
-    description: 'Where the per-SObject .kant files are written, relative to the repo root.'
+    description: 'Where the per-SObject describe JSON files are written, relative to the repo root.'
     required: false
     default: '.busbar/Platforms/Salesforce/Schema'
 
@@ -22,8 +22,7 @@ inputs:
     description: |
       Comma-separated SObject filter flags. Valid values:
         createable, updateable, deletable, queryable, retrieveable, searchable,
-        custom, standard, populated, extractable, has-master-detail,
-        is-lookup-target, has-record-types, has-formula-fields, has-encrypted-fields
+        custom, standard
     required: false
     default: ''
   name-match:
@@ -76,120 +75,51 @@ inputs:
 outputs:
   changed:
     description: '"true" if the schema export produced changes that were committed (or would have been).'
-    value: ${{ steps.diff.outputs.changed }}
+    value: ${{ steps.export.outputs.changed }}
   object-count:
-    description: 'Number of SObjects written.'
-    value: ${{ steps.export.outputs.object-count }}
+    description: 'Number of describe JSON files written.'
+    value: ${{ steps.export.outputs.written_count }}
+  selected-count:
+    description: 'Number of SObjects selected after filtering.'
+    value: ${{ steps.export.outputs.selected_count }}
+  failed-count:
+    description: 'Number of SObjects that failed describe.'
+    value: ${{ steps.export.outputs.failed_count }}
   output-path:
     description: 'Path where the schema was written (echoes the input).'
-    value: ${{ inputs.output-path }}
+    value: ${{ steps.export.outputs.output_dir }}
 
+# The binary owns all logic and UX: it reads its inputs from INPUT_*, calls the
+# SF Describe API, writes one JSON file per SObject, computes the counts, writes
+# GITHUB_OUTPUT (including `changed`), the step summary and annotations, and —
+# when `commit` is true — commits the refreshed schema back to the branch. This
+# action only installs the binary and passes inputs through as env.
+#
+# NOTE: the min-field-count / max-field-count / include-counts inputs are
+# retained for contract compatibility but are no-ops (typesynth-cache specific;
+# the describe-based dump does not implement them).
 runs:
   using: 'composite'
   steps:
-    - name: Resolve release tag
-      id: tag
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [[ "${{ inputs.version }}" == "latest" ]]; then
-          tag=$(gh release view --repo "${{ inputs.binary-repo }}" --json tagName -q .tagName)
-        else
-          tag="${{ inputs.version }}"
-        fi
-        echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      env:
-        GH_TOKEN: ${{ github.token }}
-
-    - name: Determine asset name
-      id: asset
-      shell: bash
-      run: |
-        set -euo pipefail
-        os="${{ runner.os }}"
-        arch="${{ runner.arch }}"
-        case "$os-$arch" in
-          Linux-X64)   name="sf-schema-dump-x86_64-unknown-linux-gnu" ;;
-          Linux-ARM64) name="sf-schema-dump-aarch64-unknown-linux-gnu" ;;
-          macOS-X64)   name="sf-schema-dump-x86_64-apple-darwin" ;;
-          macOS-ARM64) name="sf-schema-dump-aarch64-apple-darwin" ;;
-          Windows-X64) name="sf-schema-dump-x86_64-pc-windows-msvc.exe" ;;
-          *) echo "::error::Unsupported runner: $os-$arch"; exit 1 ;;
-        esac
-        echo "name=$name" >> "$GITHUB_OUTPUT"
-
-    - name: Download sf-schema-dump binary
-      shell: bash
-      run: |
-        set -euo pipefail
-        bin_dir="${RUNNER_TEMP}/sf-schema-dump"
-        mkdir -p "$bin_dir"
-        gh release download "${{ steps.tag.outputs.tag }}" \
-          --repo "${{ inputs.binary-repo }}" \
-          --pattern "${{ steps.asset.outputs.name }}" \
-          --dir "$bin_dir"
-        bin_path="$bin_dir/${{ steps.asset.outputs.name }}"
-        chmod +x "$bin_path"
-        echo "$bin_dir" >> "$GITHUB_PATH"
-        # Provide a stable name so the next step can just call the binary.
-        if [[ "$bin_path" != "$bin_dir/sf-schema-dump" && "$bin_path" != "$bin_dir/sf-schema-dump.exe" ]]; then
-          ext=""
-          [[ "${{ runner.os }}" == "Windows" ]] && ext=".exe"
-          ln -sf "$bin_path" "$bin_dir/sf-schema-dump$ext"
-        fi
-      env:
-        GH_TOKEN: ${{ github.token }}
+    - name: Set up sf-schema-dump
+      uses: busbar-actions/setup@main
+      with:
+        binary: sf-schema-dump
+        version: ${{ inputs.version }}
+        binary-repo: ${{ inputs.binary-repo }}
 
     - name: Export schema
       id: export
       shell: bash
       env:
+        INPUT_OUTPUT_PATH: ${{ inputs.output-path }}
+        INPUT_FILTERS: ${{ inputs.filters }}
+        INPUT_NAME_MATCH: ${{ inputs.name-match }}
+        INPUT_OBJECTS: ${{ inputs.objects }}
+        INPUT_COMMIT: ${{ inputs.commit }}
+        INPUT_COMMIT_MESSAGE: ${{ inputs.commit-message }}
+        INPUT_GIT_USER_NAME: ${{ inputs.git-user-name }}
+        INPUT_GIT_USER_EMAIL: ${{ inputs.git-user-email }}
         SF_ACCESS_TOKEN: ${{ inputs.sf-access-token }}
         SF_INSTANCE_URL: ${{ inputs.sf-instance-url }}
-      run: |
-        set -euo pipefail
-        # Typesynth-free path: `schema dump` writes one JSON file per SObject
-        # via the SF REST Describe API. Replaces the older `schema cache`,
-        # which produced .kant files via typesynth's Declared model.
-        args=(--output "${{ inputs.output-path }}")
-
-        if [[ -n "${{ inputs.filters }}" ]]; then
-          args+=(--filters "${{ inputs.filters }}")
-        fi
-        if [[ -n "${{ inputs.name-match }}" ]]; then
-          args+=(--name-match "${{ inputs.name-match }}")
-        fi
-        # NOTE: --min-field-count / --max-field-count / --include-counts are
-        # not (yet) supported by `schema dump`; they were typesynth-cache
-        # specific. If still wanted, post-filter the JSON output in a step.
-
-        mkdir -p "${{ inputs.output-path }}"
-
-        log="${RUNNER_TEMP}/sf-schema-dump.log"
-        sf-schema-dump "${args[@]}" 2>&1 | tee "$log"
-
-        # `schema dump` prints "Wrote N schema files" — parse N if present.
-        count=$(grep -oE 'Wrote [0-9]+ schema files' "$log" | grep -oE '[0-9]+' | head -n1 || true)
-        echo "object-count=${count:-0}" >> "$GITHUB_OUTPUT"
-
-    - name: Detect changes
-      id: diff
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [[ -z "$(git status --porcelain -- "${{ inputs.output-path }}")" ]]; then
-          echo "changed=false" >> "$GITHUB_OUTPUT"
-        else
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-        fi
-
-    - name: Commit changes
-      if: inputs.commit == 'true' && steps.diff.outputs.changed == 'true'
-      shell: bash
-      run: |
-        set -euo pipefail
-        git config user.name  "${{ inputs.git-user-name }}"
-        git config user.email "${{ inputs.git-user-email }}"
-        git add -- "${{ inputs.output-path }}"
-        git commit -m "${{ inputs.commit-message }}"
-        git push
+      run: sf-schema-dump

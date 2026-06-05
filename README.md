@@ -1,3 +1,8 @@
+> [!WARNING]
+> **`busbar-actions` is under heavy active development — expect breaking changes.**
+> These repositories are public, but **not ready for use yet** — please don't depend on them.
+> A pilot is starting soon: **[star and watch the busbar-actions organization](https://github.com/busbar-actions)** for the launch of Discussions and the pilot announcement.
+
 # busbar-actions/sf-schema
 
 Pull a Salesforce org's schema and write it into your repo as **per-SObject JSON describe files**, so schema drift surfaces as reviewable git diffs.
@@ -6,42 +11,96 @@ Each SObject lands as `<output-path>/<SObjectName>.json` containing the full RES
 
 ## What it does
 
-Wraps the `busbar-sf schema dump` command, which:
+Installs and runs the `sf-schema-dump` binary, which:
 
-1. Authenticates to Salesforce via session token (`SF_ACCESS_TOKEN` + `SF_INSTANCE_URL`).
-2. Fetches the org's SObject list (optionally filtered by capability / name glob / explicit object list).
-3. Calls REST Describe on each selected SObject and writes the JSON to `<output-path>/<Name>.json`.
-4. (Optionally) commits the result back to the current branch.
+1. Authenticates to Salesforce via `busbar-auth` (`session_from_env`). **By default it self-mints**: when no `sf-access-token` is supplied, the binary exchanges the runner's GitHub OIDC id-token in-process for a short-lived session against the Busbar-equipped org at `target-instance`, holds it only in zeroizing memory, and revokes + zeroizes it (`session.dispose()`) at exit. If you instead pass `sf-access-token` + `sf-instance-url`, it uses that handed-off token directly and skips OIDC.
+2. Resolves the candidate SObject list — either the explicit `objects` list, or the org's global SObject list (`GET /services/data/vXX/sobjects/`).
+3. Filters candidates by capability flags (`filters`) and/or an API-name glob (`name-match`).
+4. Calls REST Describe on each selected SObject and writes the pretty JSON to `<output-path>/<Name>.json`.
+5. When `commit` is `true`, commits the refreshed schema back to the current branch.
+6. Emits GitHub outputs, a job summary table, and warning annotations for any SObjects that failed describe.
 
 The implementation is typesynth-free — pure `reqwest` against `/services/data/vXX/sobjects/<Name>/describe` — so the binary stays small and builds without the schema-modeling crate.
+
+## Usage (OIDC self-mint — default, recommended)
+
+No Salesforce token in GitHub: the binary mints its own short-lived token from the runner's OIDC id-token. **Grant `permissions: id-token: write`** and point `target-instance` at your Busbar-equipped org.
+
+```yaml
+permissions:
+  contents: write   # required only when commit: true
+  id-token: write   # required for the OIDC token exchange
+
+steps:
+  - uses: actions/checkout@v4
+
+  - uses: busbar-actions/sf-schema@v1
+    with:
+      target-instance: https://acme.my.salesforce.com
+      filters: custom
+      name-match: 'Account*'
+```
+
+The org must trust this repo (`sf busbar trust request approve`); a first run from a new repo/workflow stops with a pending-trust error until approved.
+
+### Local-dev / advanced override (handed-off token)
+
+If you already have a session token (e.g. local testing), set both `sf-access-token` and `sf-instance-url`; the binary uses them directly and skips OIDC. Do not use this in CI — prefer the OIDC path so no SF token is ever passed through the workflow.
+
+```yaml
+- uses: busbar-actions/sf-schema@v1
+  with:
+    sf-access-token: ${{ secrets.SF_ACCESS_TOKEN }}
+    sf-instance-url: ${{ secrets.SF_INSTANCE_URL }}
+    filters: custom
+```
 
 ## Inputs
 
 | Input | Required | Default | Description |
 |---|---|---|---|
-| `sf-access-token` | yes | — | SF session token. Provide via a secret. |
-| `sf-instance-url` | yes | — | e.g. `https://acme.my.salesforce.com` |
-| `output-path` | no | `.busbar/Platforms/Salesforce/Schema` | Where the per-SObject `.kant` files are written. |
-| `filters` | no | `` | Comma-separated flags: `custom`, `standard`, `populated`, `extractable`, `has-master-detail`, `has-record-types`, `has-formula-fields`, `has-encrypted-fields`, `createable`, `updateable`, `deletable`, `queryable`, `retrieveable`, `searchable`, `is-lookup-target` |
-| `name-match` | no | `` | Glob over SObject API names (e.g. `Account*`, `*__c`) |
+| `target-instance` | yes* | `` | Busbar-equipped org instance URL for the OIDC self-mint (e.g. `https://acme.my.salesforce.com`). *Required unless you supply the `sf-access-token`/`sf-instance-url` override. Requires `permissions: id-token: write`. |
+| `eca-client-id` | no | `` | Override the External Client App consumer key for the OIDC exchange. PBO-pinned default; set only on a rotation. |
+| `token-handler` | no | `` | Override the Apex token-exchange handler dev name. Defaults to `BBGitHubTokenExchangeHandler`. |
+| `oidc-audience` | no | `` | Override the audience requested in the GitHub OIDC token. Defaults to `target-instance`. |
+| `sf-access-token` | no | `` | OPTIONAL local-dev/advanced override: a handed-off Salesforce session access token. When set (with `sf-instance-url`), the binary uses it directly and skips OIDC. |
+| `sf-instance-url` | no | `` | OPTIONAL override paired with `sf-access-token`, e.g. `https://acme.my.salesforce.com`. |
+| `output-path` | no | `.busbar/Platforms/Salesforce/Schema` | Where the per-SObject `.json` describe files are written, relative to the repo root. |
+| `filters` | no | `` | Comma-separated capability flags; all must match. Valid values: `createable`, `updateable`, `deletable`, `queryable`, `retrieveable`, `searchable`, `custom`, `standard`. |
+| `name-match` | no | `` | Glob over SObject API names (e.g. `Account*`, `*__c`). Applied in addition to `filters`. |
 | `objects` | no | `` | Explicit comma-separated SObject list. Overrides `filters` / `name-match` when set. |
-| `min-field-count` | no | `` | Drop SObjects with fewer than N fields. |
-| `max-field-count` | no | `` | Drop SObjects with more than N fields. |
-| `include-counts` | no | `false` | Include record counts (one extra API call per SObject). |
-| `version` | no | `latest` | `busbar-sf` release tag to download. |
-| `binary-repo` | no | `busbar-actions/actions-dist` | Repo that publishes `busbar-sf` binary releases. |
-| `commit` | no | `true` | Commit any changes back to the current branch. |
-| `commit-message` | no | `chore(schema): refresh Salesforce schema` | |
-| `git-user-name` | no | `busbar-bot` | |
-| `git-user-email` | no | `bot@busbar.agency` | |
+| `version` | no | `latest` | `sf-schema-dump` release tag to download (e.g. `v0.4.2`). `latest` resolves the most recent release. |
+| `binary-repo` | no | `busbar-actions/actions-dist` | Repo that publishes the `sf-schema-dump` binary releases. |
+| `commit` | no | `true` | Commit any changes back to the current branch after the pull. |
+| `commit-message` | no | `chore(schema): refresh Salesforce schema` | Commit message used when changes are committed. |
+| `git-user-name` | no | `busbar-bot` | `git user.name` for the commit. |
+| `git-user-email` | no | `bot@busbar.agency` | `git user.email` for the commit. |
 
 ## Outputs
 
 | Output | Description |
 |---|---|
-| `changed` | `"true"` if the export produced file changes. |
-| `object-count` | Number of SObjects written. |
-| `output-path` | Echo of the input. |
+| `changed` | `"true"` if the schema export produced changes that were committed (or would have been). |
+| `object-count` | Number of describe JSON files written. |
+| `selected-count` | Number of SObjects selected after filtering. |
+| `failed-count` | Number of SObjects that failed describe. |
+| `output-path` | Path where the schema was written (echoes the input). |
+
+## Authentication and permissions
+
+**Default (recommended): GitHub OIDC self-mint — zero stored SF credentials.** A Salesforce access token is never handed to a script, written to `GITHUB_ENV`, passed as an input/output, or persisted. The binary mints its OWN short-lived token in-process from the runner's GitHub OIDC id-token (exchanged at the Busbar-equipped org's Apex token handler against `target-instance`), holds it only in zeroizing memory (`busbar-auth` `CredentialContext`), uses it, and **revokes + zeroizes it (`session.dispose()`) at exit** because the token is OIDC-minted-and-owned.
+
+To enable it, the caller job MUST grant `id-token: write`:
+
+```yaml
+permissions:
+  contents: write   # required only when `commit: true`
+  id-token: write   # required for the OIDC token exchange (the default auth path)
+```
+
+The org must trust this repo. On the first run from a new repo/workflow the exchange returns a pending-trust error; approve it (`sf busbar trust request approve`, which creates + activates the trust rule) and re-run.
+
+**Optional override (local-dev / advanced): handed-off token.** Set `sf-access-token` + `sf-instance-url` and the binary uses that session directly, skipping OIDC. Because such a token is handed off and not minted by this action, the binary does **not** revoke it — it only zeroizes its in-memory copy on drop. The token's lifecycle is the caller's responsibility. How you mint it is up to you (e.g. `sf org display --json` after `sf org login web`, stored in a secret). Do not use this path in CI when OIDC is available.
 
 ## Example: `workflow_dispatch` consumer
 
@@ -56,33 +115,26 @@ on:
       filters:
         description: 'SObject filters (comma-separated). Leave blank for all.'
         required: false
-        default: 'custom,has-record-types'
+        default: 'custom'
       name-match:
         description: 'Glob over SObject names (e.g. Account*)'
         required: false
         default: ''
-      include-counts:
-        description: 'Include record counts'
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: write
+  id-token: write   # OIDC self-mint
 
 jobs:
   refresh:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: busbar-actions/sf-schema@v1
         with:
-          sf-access-token: ${{ secrets.SF_ACCESS_TOKEN }}
-          sf-instance-url: ${{ secrets.SF_INSTANCE_URL }}
+          target-instance: https://acme.my.salesforce.com
           filters: ${{ inputs.filters }}
           name-match: ${{ inputs.name-match }}
-          include-counts: ${{ inputs.include-counts }}
 ```
 
 ## Example: nightly refresh
@@ -96,6 +148,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write   # OIDC self-mint
 
 jobs:
   refresh:
@@ -104,32 +157,20 @@ jobs:
       - uses: actions/checkout@v4
       - uses: busbar-actions/sf-schema@v1
         with:
-          sf-access-token: ${{ secrets.SF_ACCESS_TOKEN }}
-          sf-instance-url: ${{ secrets.SF_INSTANCE_URL }}
+          target-instance: https://acme.my.salesforce.com
           commit-message: 'chore(schema): nightly refresh'
 ```
 
-## Authentication
+## Observability
 
-For v1 the action takes a session token + instance URL via secrets:
+The binary owns its UX through the `github-actions-ux` crate:
 
-- `SF_ACCESS_TOKEN` — a live Salesforce session access token.
-- `SF_INSTANCE_URL` — e.g. `https://acme.my.salesforce.com`.
+- Writes all GitHub outputs (`changed`, `object-count`, `selected-count`, `failed-count`, `output-path`) and a job-summary table via the `Reporter`.
+- Emits warning annotations (capped at 10) for SObjects that failed describe.
+- On a fatal error it sets the step failed and exits non-zero.
 
-How you mint that token is up to you. Common patterns:
+Known gaps (tracked for a follow-up): status lines and some warnings (auth instance URL, "no SObjects matched", describe-failure counts) are still plain `eprintln!` rather than `Reporter` annotations, the crate does not use `tracing`, and `main` uses `fail()` rather than `run_outcome` + `RecordingReporter`, so a hard failure is annotated but not guaranteed into the Job Summary.
 
-- `sf org display --target-org <alias> --json` after `sf org login web` (interactive setup, store result in secrets).
-- `sf org login jwt ...` against a Connected App with a server certificate (headless; bake into a preceding workflow step that exports `SF_ACCESS_TOKEN`/`SF_INSTANCE_URL` to `$GITHUB_ENV`).
+## Binary distribution
 
-A future release will accept the busbar OIDC trust handshake from a Connected-App-side TokenExchangeHandler so no SF secret needs to live in GitHub at all.
-
-## Binary distribution (current status)
-
-This composite action downloads a `busbar-sf` release binary from `binary-repo` (default: `busbar-actions/actions-dist`).
-
-**Dependency to land**: `busbar-actions/actions-dist` does not yet exist and isn't being published to. To make this action work end-to-end, we need:
-
-1. A `busbar-actions/actions-dist` repo (empty source, used purely as a release host).
-2. A CI workflow in `busbar-extensions` that on tag push (or workflow_dispatch) builds `busbar-sf` (`cargo build --release -p busbar-sf --bin busbar-sf`) for the supported targets — `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc` — and creates a release in `busbar-actions/actions-dist` with those binaries attached using the asset names this action expects (see `action.yml` → "Determine asset name"). Cross-repo publishing requires a PAT or GitHub App installed on both repos.
-
-Once that's in place, tag this action `v1` and consumers can pin it.
+This composite action downloads an `sf-schema-dump` release binary from `binary-repo` (default `busbar-actions/actions-dist`) via the shared `busbar-actions/setup` install action, then runs it with all inputs passed through as `INPUT_*` / `SF_*` env.
